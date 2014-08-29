@@ -5,8 +5,6 @@
 #include <unistd.h>
 #include <string.h>	// Needed for memset()
 
-#include <sched.h>
-
 /**
  *
  /*
@@ -15,7 +13,7 @@
  *  Connect...
  *   NeoPixel data pin -> Raspberry PI GPIO 14 (pin P1-08)
  *   Neopixel GND  pin -> Raspberry PI any ground (pin P1-06, for example)
- *   NeoPixel VCC  pin -> 3.5-4.7 volt DC power supply (Note that 5 volt DC will also usually work)
+ *   NeoPixel VCC  pin -> Raspberry PI 3V3 pin (P1-01)
  *
  */
 
@@ -27,8 +25,6 @@
 #define NEOPIXEL_RES_US	(50)				// How long to hold the data line low to latch a NeoPixel as per WS2812B data sheet
 
 // Note that this calculation rounds down to a divisor of 15, which yields a bit width of 480ns which is perfect for NeoPixels!
-
-
 
 
 // Lots of extremely helpful and well-written code & ideas borrowed from...
@@ -139,7 +135,6 @@
 #define BV(bit) (1<<bit)
 
 
-
 // Map a peripheral from a physical address into a userspace memory pointer
 
 static volatile unsigned *map_peripheral(unsigned base, unsigned len)
@@ -188,9 +183,8 @@ volatile unsigned *aux;
 #define BAUD_DIV  		(CPU_FRQ/UART_FRQ)	// How many cpu cycles per UART cycle?
 
 
-// Setup UART 1 gets everything read for the mini UART to send NeoPixel data
-// It leaves GPIO 14 in a low state (by asserting break), the FIFO empty, and the TX disabled
-
+// SetupUART1 gets everything ready for the mini UART to send NeoPixel data
+// It leaves pin P1-08 in a low state by asserting break, the FIFO empty, and the TX disabled
 
 void setupUart1()
 {
@@ -263,17 +257,26 @@ void setupUart1()
 }
 
 
-// Actually send data bytes out the mini-uart on GPIO pin 14
+// An EncodedNeoBuffer type holds 24 bits of pixel data encoded into 8 bytes
+// read to be transmitted out a UART (the correct speed must be used) and receieved by a NeoPixel
+
+typedef struct {
+
+	char bytes[8];
+
+} EncodedNeoBuffer;
+
+
+
+
+// Actually send 8 bytes of NeoPixel data to the mini-uart on pin P1-08
 // expects that the UART has been setup and and break is asserted
 // exits with break asserted and all bytes completely sent
 
-// Note that the first byte sent should have as many leading 0 bits as possible
-// to give time between when we enable the tx and when we deassert break
 
-// Returns number of bytes NOT sent because we got interrupted/prempted
-// Returns 0 on success
+void sendUart1( EncodedNeoBuffer *encodedNeoBuffer ) {
 
-unsigned senddata( unsigned char *data , unsigned len ) {
+	unsigned char *data = encodedNeoBuffer->bytes;
 
 
 	AP( aux , AUX_MU_CNTL_REG ) = 0;			// disable transmitter. BAP16
@@ -287,14 +290,14 @@ unsigned senddata( unsigned char *data , unsigned len ) {
 
 	// stuff the FIFO with our bytes so they are ready to go out as soon as we enable the transmitter..
 
-	while ( len && ! ( AP( aux , AUX_MU_STAT_REG ) & AUX_MU_STAT_TX_FULL ) ) {
+	int len = sizeof( encodedNeoBuffer->bytes );
+
+	while ( len ) {
 
 		  AP( aux , AUX_MU_IO_REG) = *data;
 
 		  data++;
 		  len--;
-
-		  printf("pumped\n");
 
 	  }
 
@@ -322,24 +325,20 @@ unsigned senddata( unsigned char *data , unsigned len ) {
 												// As long as we make sure the 1st bit out the gate is a 0, and that we wait until the transmitter
 												// starts sending that 0 bit then the transition from break to data should
 												// be seamless and glitch free.
+												//
+												// Note that having additional 0 bits at the begining of the 1st byte will give us even more time to
+												// to ride out a possible interruptions. The encoding style used in NeoUART ensures that the first bit of
+												// of every byte is 0, so we will actually get >4ms of ride though time.
 
 
 	AP( aux , AUX_MU_CNTL_REG ) = AUX_MU_CNTL_REG_TXEN;			// Bit 1 = enable transmitter. BAP16
 												// Note that the transmitter will immediately start sending the 1st byte in the fifo, but we cant see it
 												// on the pin yet because the break is still asserted and that covers any data that the UART maybe sending
 
-/*
-	while ( AP( aux , AUX_MU_STAT_REG ) & AUX_MU_STAT_TX_ILDE );	// Wait for the 1st byte in the FIFO to actually start going out the transmitter
-																	// this means that we are actually putting bits out of the transmitter rather than just the
-																	// idle state which is high.
-																	// if we didn't wait, then we might de-assert break too soon and the transmitter might still be
-																	// sending the idle HIGH which would cause a glitch
-*/
-
 
 	while ( AP( aux , AUX_MU_STAT_REG ) & AUX_MU_STAT_TX_FULL ); 	// Wait for the 1st byte in the FIFO to get loaded into the transmitter
 																	// which indicates two things...
-																	// 1) there is now a zero bit (slowly) being transmitted on the UART, so we are
+																	// 1) there is now a zero start bit (slowly) being transmitted on the UART, so we are
 																	//    safe to de-assert the break signal without causing a glitch
 																	// 2) there is now a free byte at the end of the FIFO that we can stuff
 																	//    with a trailing 0 as a buffer
@@ -353,10 +352,6 @@ unsigned senddata( unsigned char *data , unsigned len ) {
 												// becuase the neopixel we are controlling will have already seen his 24 bits of good data and will
 												// ignore that extra 1 bit.
 
-
-
-
-	//printf("key to end break\n"); getchar();
 
 
 	AP( aux, AUX_MU_LCR_REG)  = AUX_MU_LCR_REG_8BIT; // This will de-assert the break signal, so now the pin will now show whatever the uart is actually transmitting,
@@ -377,45 +372,11 @@ unsigned senddata( unsigned char *data , unsigned len ) {
     AP( aux, AUX_MU_LCR_REG)  = AUX_MU_LCR_REG_BREAK | AUX_MU_LCR_REG_8BIT;// BAP14 turn break on - make pin goto 0 volts
 
     usleep( NEOPIXEL_RES_US );										// Hold low for at least this long to let the NeoPixels latch
-    																	// Almost certainly not needed, but good form to have so the code will still work
-    																	// when the ARM77 @ 2.3THz comes out....
-
-    return( len );		// Return the number of unsent bytes. 0=Success, anything else means we got premepted and the LEDs likely latched, so better to start over
+    																// Almost certainly not needed, but good from to have so the code will still work
+    																// when the ARM77 @ 2.3THz comes out....
 
 } // senddata
 
-
-
-// An EncodedNeoBuffer type holds 24 bits of pixel data encoded into 8 bytes
-// read to be transmitted out a UART (the correct speed must be used) and receieved by a NeoPixel
-
-typedef struct {
-
-	char bytes[8];
-
-} EncodedNeoBuffer;
-
-
-
-void printbits(unsigned n) {
-
-	int b = 8;
-
-	while (b) {
-
-		if (n & 1)
-			printf("1");
-		else
-			printf("0");
-
-
-
-		n >>= 1;
-		b--;
-	}
-	printf("\n");
-
-}
 
 
 // Encode a 24 bit value into 8 bytes where each byte has the format...
@@ -444,12 +405,6 @@ void encodebits( unsigned x , EncodedNeoBuffer *buffer )  {
 			t |= 0b00000100;
 		}
 
-		printf("x=%x\n",x);
-		printbits(x);
-		printf("t=%x\n",t);
-		printbits(t);
-
-
 		x <<= 1 ;
 		bits--;
 
@@ -457,13 +412,6 @@ void encodebits( unsigned x , EncodedNeoBuffer *buffer )  {
 		if (x & (1<<23) ) {
 			t |= 0b00100000;
 		}
-
-		printf("x=%x\n",x);
-		printbits(x);
-		printf("t=%x\n",t);
-		printbits(t);
-
-
 
 		x <<= 1 ;
 		bits--;
@@ -473,20 +421,10 @@ void encodebits( unsigned x , EncodedNeoBuffer *buffer )  {
 			t |= 0b10000000;
 		}
 
-		printf("x=%x\n",x);
-		printbits(x);
-		printf("t=%x\n",t);
-		printbits(t);
-
-
-
 		x <<= 1 ;
 		bits--;
 
 		*b = t;
-
-
-
 
 		b++;
 
@@ -508,18 +446,14 @@ int main(int argc, char **argv)
 
   data = strtol( argv[1], NULL ,16);
 
-  printf("data %x\n",  data);
+  // NeoPixels want dat in GRB format, but most humans are used to RGB so lets just
+  // swap the R and G bytes...
+
+  data = ( (data & 0x00FF00) << 8 ) | ( ( data & 0xFF0000 ) >> 8 ) | ( data & 0x0000FF) ;
 
   encodebits(  data , &buffer );
 
-  int p=0;
-  for(p=0;p<8;p++) {
-
-   printbits( buffer.bytes[p] );
-  }
-
-
-  senddata( buffer.bytes  , sizeof(buffer.bytes) );
+  sendUart1( &buffer   );
 
 } // main
 
