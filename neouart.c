@@ -15,6 +15,7 @@
  *   Neopixel GND  pin -> Raspberry PI any ground (pin P1-06, for example)
  *   NeoPixel VCC  pin -> Raspberry PI 3V3 pin (P1-01)
  *
+ *
  */
 
 
@@ -22,9 +23,13 @@
 
 #define CPU_FRQ 		(250000000)			// Main system clock at 250mhz
 #define BIT_FRQ			(1000000000/400)	// Target output bit width = 500ns as per WS2812data sheet. Note that we will make the H and L data pulses out of 1 or 2 of these bits
-#define NEOPIXEL_RES_US	(50)				// How long to hold the data line low to latch a NeoPixel as per WS2812B data sheet
 
-// Note that this calculation rounds down to a divisor of 15, which yields a bit width of 480ns which is perfect for NeoPixels!
+#define UART_FRQ 		(BIT_FRQ*8)			// There are uart 8 cycles per bit on the mini uart BAP11
+#define BAUD_DIV  		(CPU_FRQ/UART_FRQ)	// How many cpu cycles per UART cycle?
+											// Note that this calculation rounds down to a divisor of 15, which yields a bit width of 480ns which is perfect for NeoPixels!
+
+#define NEOPIXEL_RES_US	(50)				// How long to hold the data line low to latch a NeoPixel as per WS2812B data sheet
+											// Note: imperically I have found this only needs to be about 10us, but we will go by the book here.
 
 
 // Lots of extremely helpful and well-written code & ideas borrowed from...
@@ -35,6 +40,9 @@
 // https://github.com/dwelch67/raspberrypi/blob/master/uart01/uart01.c
 // Example of how to access the mini-UART
 
+// All code below is written for clarity and not speed. There are so many places here that would
+// be so satisfying to rewrite in super-optimized, hand crafted ARM assembler. Fight the urge,
+// becuase this program spends 99.999% of its time waiting for the UART, so all the work would be for nothing.
 
 // All references in the form BAPn mean refer to page n in the BCM2835 ARM Peripherals guide here...
 // http://www.raspberrypi.org/wp-content/uploads/2012/02/BCM2835-ARM-Peripherals.pdf
@@ -159,28 +167,7 @@ static volatile unsigned *map_peripheral(unsigned base, unsigned len)
 	return vaddr;
 }
 
-
-/*
- * delay function
- * int32_t delay: number of cycles to delay
- *
- * This just loops <delay> times in a way that the compiler
- * wont optimize away.
- *
- * Source: http://wiki.osdev.org/ARM_RaspberryPi_Tutorial_C#uart.c
- */
-
-static void delay(unsigned count) {
-    asm volatile("__delay_%=: subs %[count], %[count], #1; bne __delay_%=\n"
-	     : : [count]"r"(count) : "cc");
-}
-
-volatile unsigned *gpio;
 volatile unsigned *aux;
-
-
-#define UART_FRQ 		(BIT_FRQ*8)			// There are uart 8 cycles per bit on the mini uart BAP11
-#define BAUD_DIV  		(CPU_FRQ/UART_FRQ)	// How many cpu cycles per UART cycle?
 
 
 // SetupUART1 gets everything ready for the mini UART to send NeoPixel data
@@ -210,44 +197,35 @@ void setupUart1()
 
 	AP( aux, AUX_MU_IIR_REG)  = AUX_MU_IIR_REG_CLR_TX_FIFO; 		// BAP13 clear the transmit FIFO (docs are mixed up)
 
-	// we need to get GPIO pin 14 into alternate mode #5 for the AUX UART TX to show up there
-	// The pin 14 alt function is controlled by FSEL14 which is GPFSEL1 bits 14-12 per BAP92
 
+	// We only need to access the GPIO registers to set up the P1-08 pin to be connected to the UART1 TX
+
+	volatile unsigned *gpio;
 	gpio = map_peripheral( GPIO_BASE , GPIO_LEN );
-
 
 	/*
 
 		****
-		**** GPIO14 is a serial port TX pin by default when the PI powers up, so I am going to
-		**** thoughtfully skip the step of disabling the pull-ups and -downs.
-		**** If you want to play it extra safe, or you have code than mangles GPIO 14 before running
-		**** this code, feel free to uncomment below. Note that the worst case failure mode is
-		**** that the UART output has to fight a pull-up or -down as wastes a tiny bit of power.
-
-		// Turn off pull-up and pull-down on pin 14
-
-		AP( gpio , GPPUD ) = 0x00;		// Prepare to turn off pull-up and pull-down resistors on signaled pins BAP100
-		delay(150);						// Wait 150 cycles as per BAP101
-
-		AP( gpio , GPPUDCLK0) = BV(14);	// Signal gpio pin 14 to listen to instruction (which was to turn off both pull up and down)
-		delay(150);						// Wait 150 cycles as per BAP101
-
-		AP( gpio , GPPUD ) = 0x00;		// And finish the sequence as per BAP 101
-
-		//Ok, pull-up and down on gpio 14 now off
-
+		**** P1-08 is a serial port TX pin by default when the PI powers up, so I am going to
+		**** thoughtfully skip the step of disabling the pull-ups and -downs which would
+		**** otherwise go here.
+		****
+		**** If you have other code code that mangles this pin before running this code,
+		**** note that the worst case failure mode is that the UART output has to fight a
+		**** pull-up or -down as wastes a tiny bit of power, but it should work fine.
+		****
 
 	 */
 
-	// next let's assign it to the mini uart, which is alt function 5
+	// we need to get GPIO pin 14 into alternate mode #5 for the AUX UART TX to show up there
+	// The pin 14 alt function is controlled by FSEL14 which is GPFSEL1 bits 14-12 per BAP92
 
 	unsigned gpfsel1_temp = AP( gpio , GPFSEL1 ); 	// Get the current value of the gpio select register
 
 	// We need to assign FSEL14 (which is bits 14-12) to 010 to make GPIO pin 14 take alt function 5 (BAP92)
 
 	gpfsel1_temp &= ~( 0b111 << 12 );			// Clear bits 12-14
-	gpfsel1_temp |= 0b010 << 12;				// Assign bits 12-14 = 010
+	gpfsel1_temp |= 0b010 << 12;				// Assign bits 12-14 = 010, select alt function 5
 
 	AP( gpio , GPFSEL1 ) = gpfsel1_temp;		// Put new calculated value back into the register
 
@@ -265,7 +243,6 @@ typedef struct {
 	char bytes[8];
 
 } EncodedNeoBuffer;
-
 
 
 
@@ -361,6 +338,7 @@ void sendUart1( EncodedNeoBuffer *encodedNeoBuffer ) {
 												// Set the real target baud rate, which will speed up the remaining bits in the transmitter
 
 
+
     while ( ! (AP( aux , AUX_MU_STAT_REG ) & AUX_MU_STAT_TX_EMPTY) );	// Wait for all the bytes in the FIFO to be transmitted out...
     																	// Note that there will still be our trailing byte of 0 padding in the actual transmitter
     																	// even though the FIFO is empty. It is no problem if we assert break while those 0 bits are
@@ -432,28 +410,110 @@ void encodebits( unsigned x , EncodedNeoBuffer *buffer )  {
 
 }
 
+// Display the passed color for durration on the attached NeoPixel
+// Passed number in the format 0xDDRRGGBB
+// DD = 0-ff durration in 1/100's of seconds
+// RR = 0-ff red brightness
+// GG = 0-ff green brightness
+// BB = 0-ff blue brightness
+//
+// Nice format becuase durration defaults to 0 if ommited, and then you just have RRGGBB.
+
+
+void showpixel( unsigned drgb )  {
+
+
+	EncodedNeoBuffer buffer;
+
+	unsigned grb =   ( (drgb  & 0x00FF00) << 8 ) | ( ( drgb & 0xFF0000 ) >> 8 ) | ( drgb & 0x0000FF) ;
+
+	encodebits(  grb , &buffer );
+
+	sendUart1( &buffer   );
+
+	// Get durration byte. (I know AND not nessisary, but cleaner code)
+
+	unsigned duration = ( ( drgb & 0xff000000 ) >> 24);
+
+	if (duration) usleep( duration * 10000); 	// Convert 1/100s to us
+
+}
+
 
 int main(int argc, char **argv)
 {
 
-  printf("setup uart...\n");
-
   setupUart1();
 
-  EncodedNeoBuffer buffer;
+  if (argc < 2 )  { // No args specified, read duration/color values from stdin...
 
-  unsigned data;
+	  printf("Reading from stdin. Try %s -? for help.\n" , argv[0] );
 
-  data = strtol( argv[1], NULL ,16);
 
-  // NeoPixels want dat in GRB format, but most humans are used to RGB so lets just
-  // swap the R and G bytes...
+	  /*
+	   char *line = NULL;
+	   size_t len = 0;
 
-  data = ( (data & 0x00FF00) << 8 ) | ( ( data & 0xFF0000 ) >> 8 ) | ( data & 0x0000FF) ;
+	   while ( getline(&line, &len, stdin )) != -1) {
+		   showpixel( strtol( line , NULL , 16 ) & 0xffff );				// Read each line as a hex number, then show it
+	   }
 
-  encodebits(  data , &buffer );
+	   free(line);
 
-  sendUart1( &buffer   );
+	   */
+
+	  unsigned pixelspec;
+
+	  while (scanf("%x",&pixelspec ) != EOF ) {
+
+
+		  showpixel( pixelspec );				// Read each line as a hex number, then show it
+
+	  }
+
+  } else {		// At least one param on the command line...
+
+	  if (argv[1][0] == '-' ) { 		// if any options passed, show help screen...
+
+		  printf("NeoUART (c)2014, josh. See http://josh.com for more info.\n");
+		  printf("Drives a WS2812B NeoPixel connected to Raspberry Pi pin P1-08\n");
+		  printf("\n");
+		  printf("Accepts pixelspecs in the format [DD]RRGGBB where...\n");
+		  printf("[DD] is an optional durration in 1/100s of seconds, and\n");
+		  printf("and RR, GG, and BB are the briness level for red, green, and blue respecively.\n");
+		  printf("\n");
+		  printf("All values are hex numbers in the range 00-ff.\n");
+		  printf("\n");
+		  printf("Examples of pixelspecs:\n");
+		  printf("000000=Black, 05FFFF=white for .05s, 800080=50% blue for 1.28s\n");
+		  printf("\n");
+		  printf("You can specify one or more pixelspecs on the command line, or run the\n");
+		  printf("program without parameters and it will read and execute pixelspecs from\n");
+		  printf("stdin. \n");
+		  exit( -1 );
+
+	  } else {		// Parse passed pixelspecs from command line
+
+		  unsigned pixelspec;
+
+		  int arg=1;
+
+		  while ( arg < argc) {
+
+			  sscanf( argv[arg] , "%x" , &pixelspec );
+
+			  showpixel( pixelspec );
+
+			  arg++;
+
+		  }
+
+	  }
+
+
+  }
+
+
 
 } // main
 
