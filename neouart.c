@@ -4,6 +4,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <string.h>	// Needed for memset()
+#include <ctype.h>  // Needed for ishexdigit() and isdigit() in parser
 
 /**
  *
@@ -440,6 +441,7 @@ void showpixel( unsigned drgb )  {
 }
 
 
+
 int main(int argc, char **argv)
 {
 
@@ -451,10 +453,9 @@ int main(int argc, char **argv)
 
 	  unsigned pixelspec;
 
-	  while (scanf("%x",&pixelspec ) != EOF ) {
+	  while ( scanf( " %x" , &pixelspec ) == 1 ) {			// Read untill we hit something that can't be parsed or EOF
 
-
-		  showpixel( pixelspec );				// Read each line as a hex number, then show it
+		  showpixel( pixelspec );
 
 	  }
 
@@ -485,7 +486,7 @@ int main(int argc, char **argv)
 
 		  int arg=1;
 
-		  while ( arg < argc) {
+		  while ( arg < argc ) {
 
 			  sscanf( argv[arg] , "%x" , &pixelspec );
 
