@@ -449,19 +449,6 @@ int main(int argc, char **argv)
 
 	  printf("Reading from stdin. Try %s -? for help.\n" , argv[0] );
 
-
-	  /*
-	   char *line = NULL;
-	   size_t len = 0;
-
-	   while ( getline(&line, &len, stdin )) != -1) {
-		   showpixel( strtol( line , NULL , 16 ) & 0xffff );				// Read each line as a hex number, then show it
-	   }
-
-	   free(line);
-
-	   */
-
 	  unsigned pixelspec;
 
 	  while (scanf("%x",&pixelspec ) != EOF ) {
@@ -514,7 +501,4 @@ int main(int argc, char **argv)
   }
 
 
-
 } // main
-
-
