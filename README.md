@@ -21,5 +21,7 @@ You can specify one or more pixelspecs on the command line, or run the
 program without parameters and it will read and execute pixelspecs from
 stdin.
 
+Example:
 
+neouart <demos/disco.nua
 
