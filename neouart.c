@@ -423,7 +423,6 @@ void encodebits( unsigned x , EncodedNeoBuffer *buffer )  {
 
 void showpixel( unsigned drgb )  {
 
-
 	EncodedNeoBuffer buffer;
 
 	unsigned grb =   ( (drgb  & 0x00FF00) << 8 ) | ( ( drgb & 0xFF0000 ) >> 8 ) | ( drgb & 0x0000FF) ;
@@ -467,8 +466,8 @@ int main(int argc, char **argv)
 		  printf("Drives a WS2812B NeoPixel connected to Raspberry Pi pin P1-08\n");
 		  printf("\n");
 		  printf("Accepts pixelspecs in the format [DD]RRGGBB where...\n");
-		  printf("[DD] is an optional durration in 1/100s of seconds, and\n");
-		  printf("and RR, GG, and BB are the briness level for red, green, and blue respecively.\n");
+		  printf("[DD] is an optional duration in 1/100s of seconds, and\n");
+		  printf("and RR, GG, and BB are the brightness level for red, green, and blue respecively.\n");
 		  printf("\n");
 		  printf("All values are hex numbers in the range 00-ff.\n");
 		  printf("\n");
