@@ -3,13 +3,14 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <string.h>	// Needed for memset()
-#include <ctype.h>  // Needed for ishexdigit() and isdigit() in parser
+#include <string.h>		// Needed for memset()
+#include <ctype.h>  	// Needed for ishexdigit() and isdigit() in parser
+#include <stdbool.h>	// Needed for bool type
 
 /**
  *
  /*
- *  NeoUART - A utility for controlling a WS2812B NeoPixel from a Raspberry PI
+ *  NeoUART - A utility for controlling a NeoPixel from a Raspberry PI
  *
  *  Connect...
  *   NeoPixel data pin -> Raspberry PI GPIO 14 (pin P1-08)
@@ -19,15 +20,14 @@
  *
  */
 
-
 // Timing constants
 
 #define CPU_FRQ 		(250000000)			// Main system clock at 250mhz
-#define BIT_FRQ			(1000000000/400)	// Target output bit width = 500ns as per WS2812data sheet. Note that we will make the H and L data pulses out of 1 or 2 of these bits
+#define BIT_FRQ			(1000000000/400)	// Target output bit width = 400ns as per WS2812data sheet. Note that we will make the H and L data pulses out of 1 or 2 of these bits
 
 #define UART_FRQ 		(BIT_FRQ*8)			// There are uart 8 cycles per bit on the mini uart BAP11
 #define BAUD_DIV  		(CPU_FRQ/UART_FRQ)	// How many cpu cycles per UART cycle?
-											// Note that this calculation rounds down to a divisor of 15, which yields a bit width of 480ns which is perfect for NeoPixels!
+											// Note that this calculation rounds down to a divisor of 12, which yields a bit width of 480ns which is perfect for NeoPixels!
 
 #define NEOPIXEL_RES_US	(50)				// How long to hold the data line low to latch a NeoPixel as per WS2812B data sheet
 											// Note: imperically I have found this only needs to be about 10us, but we will go by the book here.
@@ -421,21 +421,109 @@ void encodebits( unsigned x , EncodedNeoBuffer *buffer )  {
 // Nice format becuase durration defaults to 0 if ommited, and then you just have RRGGBB.
 
 
-void showpixel( unsigned drgb )  {
+bool ws2811mode = false; 	// For WS28122 NeoPixels, the bytes are sent in RGB order.
+
+bool verbosemode = true;	// print messages
+
+
+void showpixel( unsigned pixelspec )  {
 
 	EncodedNeoBuffer buffer;
 
-	unsigned grb =   ( (drgb  & 0x00FF00) << 8 ) | ( ( drgb & 0xFF0000 ) >> 8 ) | ( drgb & 0x0000FF) ;
 
-	encodebits(  grb , &buffer );
+	unsigned pixeldata;
+
+	if (ws2811mode) {			// WS2811 expects data in RGB order
+
+		pixeldata =   (pixelspec  & 0xFFFFFF);
+
+	} else {					// WS2812 expects data in GRB order
+
+		pixeldata =   ( (pixelspec  & 0x00FF00) << 8 ) | ( ( pixelspec & 0xFF0000 ) >> 8 ) | ( pixelspec & 0x0000FF) ;
+
+	}
+
+
+	encodebits(  pixeldata , &buffer );
 
 	sendUart1( &buffer   );
 
 	// Get durration byte. (I know AND not nessisary, but cleaner code)
 
-	unsigned duration = ( ( drgb & 0xff000000 ) >> 24);
+	unsigned duration = ( ( pixelspec & 0xff000000 ) >> 24);
+
+	if (verbosemode) {
+		printf("showing pixel r=%02x g=%02x b=%02x d=%0d.%02ds\n", (pixelspec & 0xff0000) >> 16  , (pixelspec & 0xff00) >> 8  , (pixelspec & 0xff)   , duration / 100 , duration % 100 );
+	}
 
 	if (duration) usleep( duration * 10000); 	// Convert 1/100s to us
+
+}
+
+signed smoothsteps=0; 			// number of hundreths of seconds to smooth consecutive colors
+								// This has to be signed becuase c does not do int/unsigned=int
+
+// Previous pixel - start at zero
+int r_previous=0;
+int g_previous=0;
+int b_previous=0;
+
+// show next pixel with smoothing between consecutive pixels.
+
+void shownextpixel( unsigned pixelspec ) {
+
+	if (smoothsteps) {
+
+		// Don't let all this bitshifting scare you - the ARM can do it exreemely efficiently
+
+		int r_new = (pixelspec & 0xff0000) >> 16;
+		int g_new = (pixelspec & 0x00FF00) >>  8;
+		int b_new = (pixelspec & 0x0000FF);
+
+		// Intermediate values held as 1/256th fixed point
+		// Since the most number of steps is 255, this should avoid rounding errors
+
+		int r_current_256ths = r_previous * 256;
+		int g_current_256ths = g_previous * 256;
+		int b_current_256ths = b_previous * 256;
+
+		// needed this intermediate step to force the calculation to be signed.
+		// I could not figure out a way to make a signed int liteereal without a cast. Can u?
+
+		int r_diff = (r_new - r_previous);
+		int g_diff = (g_new - g_previous);
+		int b_diff = (b_new - b_previous);
+
+		int r_step_256ths = (r_diff*256) / smoothsteps;
+		int g_step_256ths = (g_diff*256) / smoothsteps;
+		int b_step_256ths = (b_diff*256) / smoothsteps;
+
+		int i;
+
+		for( i= 0 ; i<(smoothsteps-1) ; i++ ) {	// Stop one step before final value. We will send final speorately to make suire we land directly on it rather than accumulaing rounding errors.
+
+			r_current_256ths += r_step_256ths;
+			g_current_256ths += g_step_256ths;
+			b_current_256ths += b_step_256ths;
+
+			int r = r_current_256ths/256;
+			int g = g_current_256ths/256;
+			int b = b_current_256ths/256;
+
+			// Show each pixel step for 1/100th of a second
+			unsigned pixelspec = ( 0x01 << 24 ) | ( r << 16) | ( (g  << 8 ) |  b );
+
+			showpixel( pixelspec );
+
+		}
+
+		r_previous = r_new;
+		g_previous = g_new;
+		b_previous = b_new;
+
+	}
+
+	showpixel(pixelspec);
 
 }
 
@@ -444,61 +532,98 @@ void showpixel( unsigned drgb )  {
 int main(int argc, char **argv)
 {
 
+  int arg=1;
+
+  while (arg<argc && argv[arg][0]=='-') {
+
+	  switch (tolower(argv[arg][1])) {
+
+	      case 'q':
+	    	  verbosemode=false;
+	    	  break;
+
+	      case 'i':
+	    	  ws2811mode = true;
+
+	    	  if (verbosemode) {
+	    		  printf("Sending data in WS2811 mode.\n");
+	    	  }
+	    	  break;
+
+	      case 's':
+	    	  smoothsteps = atoi( argv[arg] +2  );
+
+	    	  if (verbosemode) {
+	    		  printf("Smoothing each change over %0d.%02d seconds.\n" , smoothsteps/100 , smoothsteps % 100);
+	    	  }
+	    	  break;
+
+	      case '?':
+			  printf("NeoUART (c)2014, josh. See http://josh.com for more info.\n");
+			  printf("Drives a NeoPixel connected to Raspberry Pi pin P1-08\n");
+			  printf("\n");
+			  printf("Usage: neouart [-i] [-sn] [-q] [pixelspec ...]");
+			  printf("\n");
+			  printf("-i WS2811 mode where colors are sent in RGB order (default GRB)\n");
+			  printf("-s smoothly trnasition between colors over n hundreths of a second.\n");
+			  printf("-q quiet mode.\n");
+			  printf("\n");
+			  printf("Accepts pixelspecs in the format [DD]RRGGBB where...\n");
+			  printf("[DD] is an optional duration in 1/100s of seconds, and\n");
+			  printf("RRGGBB are each the 2 digit hex brightness level for\n");
+			  printf("red, green, and blue respecively.\n");
+			  printf("\n");
+			  printf("All pixelspec values are hex numbers in the range 00-ff.\n");
+			  printf("\n");
+			  printf("Examples of pixelspecs:\n");
+			  printf("000000=Black, 05FFFF=white for .05s, 800080=50% blue for 1.28s\n");
+			  printf("\n");
+			  printf("You can specify one or more pixelspecs on the command line, or run the\n");
+			  printf("program without parameters and it will read and execute pixelspecs from\n");
+			  printf("stdin. \n");
+			  exit( -1 );
+
+          default:
+        	  printf("Unknown arg. Try %s -? for help.\n" , argv[0] );
+        	  exit(-1);
+
+	  }
+
+	  arg++;
+
+  }
+
+
   setupUart1();
 
-  if (argc < 2 )  { // No args specified, read duration/color values from stdin...
+  if (arg == argc )  { // No args specified, read pixelspec values from stdin...
 
-	  printf("Reading from stdin. Try %s -? for help.\n" , argv[0] );
+	  if (verbosemode) {
+		  printf("Reading from stdin. Try %s -? for help.\n" , argv[0] );
+	  }
 
 	  unsigned pixelspec;
 
 	  while ( scanf( " %x" , &pixelspec ) == 1 ) {			// Read untill we hit something that can't be parsed or EOF
 
-		  showpixel( pixelspec );
+		  shownextpixel( pixelspec );
 
 	  }
 
   } else {		// At least one param on the command line...
 
-	  if (argv[1][0] == '-' ) { 		// if any options passed, show help screen...
+	  unsigned pixelspec;
 
-		  printf("NeoUART (c)2014, josh. See http://josh.com for more info.\n");
-		  printf("Drives a WS2812B NeoPixel connected to Raspberry Pi pin P1-08\n");
-		  printf("\n");
-		  printf("Accepts pixelspecs in the format [DD]RRGGBB where...\n");
-		  printf("[DD] is an optional duration in 1/100s of seconds, and\n");
-		  printf("and RR, GG, and BB are the brightness level for red, green, and blue respecively.\n");
-		  printf("\n");
-		  printf("All values are hex numbers in the range 00-ff.\n");
-		  printf("\n");
-		  printf("Examples of pixelspecs:\n");
-		  printf("000000=Black, 05FFFF=white for .05s, 800080=50% blue for 1.28s\n");
-		  printf("\n");
-		  printf("You can specify one or more pixelspecs on the command line, or run the\n");
-		  printf("program without parameters and it will read and execute pixelspecs from\n");
-		  printf("stdin. \n");
-		  exit( -1 );
+	  while ( arg < argc ) {
 
-	  } else {		// Parse passed pixelspecs from command line
+		  sscanf( argv[arg] , "%x" , &pixelspec );
 
-		  unsigned pixelspec;
+		  shownextpixel( pixelspec );
 
-		  int arg=1;
-
-		  while ( arg < argc ) {
-
-			  sscanf( argv[arg] , "%x" , &pixelspec );
-
-			  showpixel( pixelspec );
-
-			  arg++;
-
-		  }
+		  arg++;
 
 	  }
 
-
   }
-
 
 } // main
